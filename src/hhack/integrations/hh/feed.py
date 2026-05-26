@@ -1,15 +1,24 @@
-"""Main-page personalized feed parser.
+"""Personalized-feed crawler — Phase 2.1 paginated SERP.
 
-Strategy: anchor on ``a[href*="/vacancy/"]`` links and walk up to the
-nearest card container. HH frequently reshuffles ``data-qa`` attributes,
-but the vacancy URL is the one piece they cannot change without breaking
-their own product. Per-field selectors are best-effort with fallbacks —
-missing fields are stored as ``NULL`` and the detail-page parser fills
-in the rest.
+The hh.ru main page is a teaser: ~5 recommendation cards plus one
+"Посмотреть N вакансий" button per resume HH is currently recommending
+against. The button is a normal anchor pointing at
+``/search/vacancy?resume=<id>&hhtmFromLabel=rec_vacancy_show_all&hhtmFrom=main``.
+That URL is the actual personalized feed; pagination is ``&page=N``.
 
-Pagination: scroll the feed until we see an ``hh_id`` already in the DB
-(incremental crawl) or until a configurable ceiling. See
-``llm-docs/decisions.md`` D-018.
+This module:
+
+1. Opens the main page just to collect those buttons (one per resume).
+2. For each button, walks ``&page=0, 1, 2, …`` on the SERP, harvests
+   cards, and stops at the first ``hh_id`` already in the DB (D-018) or
+   when the per-resume page cap is reached.
+3. Tags every card with ``feed_resume_hint=<resume_id>`` from the URL
+   it was scraped from.
+
+Card-level fields are read via ``a[href*="/vacancy/"]`` anchored on the
+card root resolved by ``getElementById(hh_id)`` first (D-020). Missing
+``data-qa`` selectors degrade to NULL, the detail-page parser fills in
+the rest.
 """
 
 from __future__ import annotations
@@ -25,7 +34,11 @@ from typing import Any, cast
 from loguru import logger
 from playwright.async_api import Page
 
-from hhack.integrations.hh.urls import HH_HOME_URL
+from hhack.integrations.hh.urls import (
+    HH_HOME_URL,
+    extract_resume_id,
+    search_url_with_page,
+)
 from hhack.persistence.job_repository import FeedCard, JobRepositoryProtocol
 
 _HARVEST_JS = """
@@ -82,14 +95,6 @@ _HARVEST_JS = """
       '[data-qa^="vacancy-serp__vacancy_snippet"]',
     ]);
 
-    let hint = null;
-    if (card) {
-      const hintEl =
-        card.querySelector('[data-qa*="recommendation"]') ||
-        card.querySelector('[data-qa*="reason"]');
-      if (hintEl && hintEl.innerText) hint = hintEl.innerText.trim() || null;
-    }
-
     position += 1;
     out.push({
       hh_id: id,
@@ -97,7 +102,6 @@ _HARVEST_JS = """
       title: title,
       company: company,
       snippet: snippet,
-      feed_resume_hint: hint,
       feed_position: position,
     });
   }
@@ -105,8 +109,25 @@ _HARVEST_JS = """
 }
 """
 
+_SEARCH_BUTTONS_JS = """
+() => {
+  const out = [];
+  const seen = new Set();
+  const anchors = document.querySelectorAll(
+    'a[data-qa="applicant-index-search-all-results-button"]'
+  );
+  for (const a of anchors) {
+    const href = a.href || '';
+    if (!href || seen.has(href)) continue;
+    seen.add(href);
+    out.push(href);
+  }
+  return out;
+}
+"""
 
-def _row_to_card(row: dict[str, Any]) -> FeedCard | None:
+
+def _row_to_card(row: dict[str, Any], *, resume_id: str | None) -> FeedCard | None:
     hh_id = row.get("hh_id")
     title = row.get("title")
     url = row.get("url")
@@ -118,92 +139,154 @@ def _row_to_card(row: dict[str, Any]) -> FeedCard | None:
         title=title,
         company=row.get("company"),
         snippet=row.get("snippet"),
-        feed_resume_hint=row.get("feed_resume_hint"),
+        feed_resume_hint=resume_id,
         feed_position=row.get("feed_position"),
     )
 
 
-async def harvest_cards(page: Page) -> list[FeedCard]:
-    """Read everything currently in the DOM and return parsed cards."""
+async def harvest_cards(page: Page, *, resume_id: str | None = None) -> list[FeedCard]:
+    """Read every vacancy card currently in the DOM.
+
+    ``resume_id`` is written to each card's ``feed_resume_hint`` so the
+    SERP loop can attribute cards to the resume HH is recommending
+    against.
+    """
     raw = cast(list[dict[str, Any]], await page.evaluate(_HARVEST_JS))
     cards: list[FeedCard] = []
     for row in raw:
-        card = _row_to_card(row)
+        card = _row_to_card(row, resume_id=resume_id)
         if card is not None:
             cards.append(card)
     return cards
 
 
-async def _dump_diagnostics(page: Page, cards: Sequence[FeedCard], directory: Path) -> None:
+async def collect_search_buttons(page: Page) -> list[str]:
+    """Return ``href`` of every "Посмотреть N вакансий" anchor on the main page.
+
+    HH renders one button per resume it currently recommends against. The
+    list may be empty if HH has no recommendations to show (new account,
+    no active resumes, etc.) — caller should warn and bail.
+    """
+    raw = cast(list[str], await page.evaluate(_SEARCH_BUTTONS_JS))
+    return [href for href in raw if isinstance(href, str) and href]
+
+
+def _timestamp() -> str:
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+async def _dump_page_html(page: Page, directory: Path, label: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    html_path = directory / f"feed-{stamp}.html"
-    json_path = directory / f"feed-{stamp}.json"
+    path = directory / f"feed-{_timestamp()}-{label}.html"
     try:
-        html_path.write_text(await page.content(), encoding="utf-8")
+        path.write_text(await page.content(), encoding="utf-8")
+        logger.bind(component="feed").info("dumped HTML: {p}", p=str(path))
     except Exception as exc:
-        logger.warning("could not dump feed HTML: {exc}", exc=exc)
-    json_path.write_text(
+        logger.bind(component="feed").warning("could not dump page HTML: {exc}", exc=exc)
+
+
+def _dump_cards_json(cards: Sequence[FeedCard], directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"feed-{_timestamp()}.json"
+    path.write_text(
         json.dumps([dataclasses.asdict(c) for c in cards], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    logger.bind(component="feed").info("diagnostics saved: {h} {j}", h=str(html_path), j=str(json_path))
+    logger.bind(component="feed").info("dumped JSON: {p}", p=str(path))
 
 
 async def discover_new_cards(
     page: Page,
     repo: JobRepositoryProtocol,
     *,
-    max_scrolls: int,
-    scroll_pause_seconds: float = 1.5,
+    max_pages: int,
+    page_pause_seconds: float = 1.5,
     dump_dir: Path | None = None,
 ) -> list[FeedCard]:
-    """Scroll the personalized feed until a known hh_id appears or `max_scrolls` is hit.
+    """Walk every SERP linked from the main page until known ``hh_id`` or page cap.
 
-    Returns only new cards (those whose hh_id was not already in the DB).
-    Diagnostics (page HTML + parsed JSON) are written to ``dump_dir`` if
-    provided, which is the recommended path during initial selector
-    validation.
+    Returns only new cards (those whose ``hh_id`` was not already in the
+    DB). When ``dump_dir`` is set, the main page's HTML and the first
+    SERP page per resume are dumped for selector validation, plus one
+    combined JSON of the harvest.
     """
     bound = logger.bind(component="feed")
     bound.info("navigating to {url}", url=HH_HOME_URL)
     await page.goto(HH_HOME_URL, wait_until="domcontentloaded")
-    await asyncio.sleep(scroll_pause_seconds)
-
-    collected: dict[int, FeedCard] = {}
-    saw_known_hh_id = False
-
-    for cycle in range(max_scrolls + 1):
-        cards = await harvest_cards(page)
-        bound.info("scroll cycle {n}: {count} cards in DOM", n=cycle, count=len(cards))
-
-        new_cards = [c for c in cards if c.hh_id not in collected]
-        for c in new_cards:
-            collected[c.hh_id] = c
-
-        known = await repo.filter_known([c.hh_id for c in new_cards])
-        if known:
-            bound.info("hit {n} known hh_ids — stopping scroll", n=len(known))
-            saw_known_hh_id = True
-            break
-
-        if cycle == max_scrolls:
-            bound.warning("max_scrolls={max_scrolls} reached without hitting a known job", max_scrolls=max_scrolls)
-            break
-
-        await page.evaluate("() => window.scrollBy(0, window.innerHeight * 0.9)")
-        await asyncio.sleep(scroll_pause_seconds)
-
-    known_set = await repo.filter_known(list(collected))
-    new_only = [c for c in collected.values() if c.hh_id not in known_set]
+    await asyncio.sleep(page_pause_seconds)
 
     if dump_dir is not None:
-        await _dump_diagnostics(page, list(collected.values()), dump_dir)
+        await _dump_page_html(page, dump_dir, "main")
+
+    button_urls = await collect_search_buttons(page)
+    bound.info("found {n} 'Посмотреть все' button(s) on main page", n=len(button_urls))
+
+    if not button_urls:
+        bound.warning(
+            "no 'applicant-index-search-all-results-button' anchors on main page — "
+            "HH may not be recommending against any active resume, or the selector changed"
+        )
+        return []
+
+    collected: dict[int, FeedCard] = {}
+    global_position = 0
+
+    for button_url in button_urls:
+        resume_id = extract_resume_id(button_url)
+        per_resume_bound = bound.bind(resume_id=resume_id or "unknown")
+        per_resume_bound.info("crawling SERP for resume — base url {u}", u=button_url)
+
+        saw_known = False
+        for page_index in range(max_pages):
+            target_url = search_url_with_page(button_url, page_index)
+            per_resume_bound.info("page {n}: goto {u}", n=page_index, u=target_url)
+            await page.goto(target_url, wait_until="domcontentloaded")
+            await asyncio.sleep(page_pause_seconds)
+
+            cards = await harvest_cards(page, resume_id=resume_id)
+            per_resume_bound.info("page {n}: {count} cards in DOM", n=page_index, count=len(cards))
+
+            if not cards:
+                per_resume_bound.info("page {n} returned no cards — stopping pagination", n=page_index)
+                break
+
+            if dump_dir is not None and page_index == 0:
+                label = f"serp-resume-{resume_id or 'unknown'}"
+                await _dump_page_html(page, dump_dir, label)
+
+            new_in_page: list[FeedCard] = []
+            for c in cards:
+                if c.hh_id in collected:
+                    continue
+                global_position += 1
+                new_in_page.append(dataclasses.replace(c, feed_position=global_position))
+
+            known = await repo.filter_known([c.hh_id for c in new_in_page])
+            new_unknown = [c for c in new_in_page if c.hh_id not in known]
+            for c in new_unknown:
+                collected[c.hh_id] = c
+
+            if known:
+                per_resume_bound.info(
+                    "hit {k} known hh_id(s) on page {n} — stopping pagination",
+                    k=len(known),
+                    n=page_index,
+                )
+                saw_known = True
+                break
+
+        if not saw_known:
+            per_resume_bound.warning(
+                "max_pages={max_pages} reached without hitting a known job",
+                max_pages=max_pages,
+            )
+
+    if dump_dir is not None:
+        _dump_cards_json(list(collected.values()), dump_dir)
 
     bound.info(
-        "feed scan finished: total_in_dom={total} new={new} hit_known={hit}",
-        total=len(collected),
-        new=len(new_only),
-        hit=saw_known_hh_id,
+        "feed scan finished: resumes={r} new={n}",
+        r=len(button_urls),
+        n=len(collected),
     )
-    return new_only
+    return list(collected.values())

@@ -456,3 +456,100 @@ an id (unlikely; their analytics rely on it).
 `feed-20260526T162630Z.json` dump where `company` / `snippet` /
 `feed_resume_hint` were all `null` despite the cards rendering
 correctly in the browser.
+
+---
+
+## D-021 · 2026-05-26 · Phase 2.1 drops the teaser; SERP is the only source
+
+**Decision:** `discover_new_cards` no longer parses cards off the main
+page itself. The main page is opened only to harvest every
+`a[data-qa="applicant-index-search-all-results-button"]` (one per
+resume HH is recommending against). For each such URL we then walk
+`/search/vacancy?resume=<id>&...&page=N` from `page=0` upward,
+re-using the same card-harvest JS the teaser used (anchored on
+`a[href*="/vacancy/"]` with the card root resolved by
+`getElementById(hh_id)` first — D-020 still applies). The SERP at
+`&page=0` already contains the same cards as the teaser, so parsing
+the main page twice would only produce duplicates.
+
+Pagination is driven by direct URL navigation (`page.goto(url +
+"&page=N")`), not by clicking a pagination control: deterministic,
+robust against pagination-DOM refactors, and keeps the rest of HH's
+query params (`resume`, `hhtmFromLabel=rec_vacancy_show_all`,
+`hhtmFrom=main`) byte-identical to the URL HH built itself.
+
+Stop conditions match D-018 — pagination ends on the first known
+`hh_id` or after `max_pages` (default 10). The CLI flag was renamed
+`--max-scrolls` → `--max-pages` to match the new unit.
+
+**Reasoning:** D-019 already documented that the main page is a
+teaser. Phase 2.1 turns that into code. Keeping the teaser parser as
+a fallback was considered and rejected: SERP `&page=0` covers it, and
+two parsing paths on the same page would either deduplicate
+correctly (waste of code) or differ subtly and confuse debugging.
+
+**Consequence on `feed_resume_hint`:** now populated unconditionally
+from the source URL's `resume=<id>` for every card the SERP walk
+produces. No card-DOM probing for a per-resume label (D-019 already
+established the hint lives in the URL, not the card).
+
+**Consequence on diagnostics (D-017):** the dump format changes
+slightly. Per scan we now write one HTML per "page we want to eyeball"
+(the main page, plus `page=0` of each resume's SERP) plus one
+combined JSON of every card collected across all resumes. Filenames
+gain a label suffix (`feed-<ts>-main.html`,
+`feed-<ts>-serp-resume-<id>.html`).
+
+---
+
+## D-022 · 2026-05-26 · Detail-page extraction reads JSON-LD JobPosting first, DOM second
+
+**Decision:** `integrations/hh/job_page.py` evaluates **both** sources
+on every vacancy page: the DOM `data-qa` selectors we already had, and
+the SEO `<script type="application/ld+json">` block whose `@type` is
+`JobPosting`. A pure `combine_extracted(raw, hh_id)` function then
+merges them: DOM wins where it has a value, JSON-LD fills the blanks.
+
+Field-by-field source policy:
+
+- `full_text`: DOM `[data-qa="vacancy-description"]` (also tries
+  `[itemprop="description"]` and `.vacancy-branded-user-content` as
+  branded fallbacks). If still empty, JSON-LD `description` with a
+  cheap HTML-to-text strip.
+- `salary`: DOM `[data-qa="vacancy-salary"]` (kept first because the
+  rendered string already carries currency formatting). Fallback —
+  `baseSalary` formatted as `"<min>-<max> <currency>"`.
+- `location`: DOM raw-address selectors, then `vacancy-address-with-map`,
+  then JSON-LD `jobLocation.address.addressLocality`.
+- `employment_type`: DOM only (`common-employment-text` and friends).
+  JSON-LD has no equivalent for HH's «Полная занятость» phrasing.
+- `posted_at`: DOM `time[datetime]` first, then JSON-LD `datePosted`.
+
+**Reasoning:** First production run showed two structural gaps in the
+DOM-only approach. (1) Branded vacancies (those wrapped in
+`<div class="tmpl_hh_content">`, e.g. hh.ru/vacancy/133397925) strip
+most `data-qa` attributes the parser depends on — `vacancy-salary`,
+`vacancy-view-raw-address`, `vacancy-view-creation-time`,
+`vacancy-view-employment-mode` all absent. Only `vacancy-description`
+survives. (2) Even on non-branded vacancies `posted_at` was extracted
+0/11 times and `location` only 4/11 — HH simply does not ship the
+selectors we were targeting.
+
+The JSON-LD `JobPosting` block is part of HH's SEO contract with
+Google Jobs and is present on every vacancy template, branded or not.
+It carries `datePosted` (which has never had a stable DOM selector),
+the description, and `jobLocation.address`. Layering JSON-LD under DOM
+gives us cheap, durable coverage without giving up the better-formatted
+DOM strings where they exist.
+
+**Alternative considered:** Add more `data-qa` fallback selectors per
+field. Rejected: per-field selector lists were already growing brittle
+and would not help with the genuinely-missing posted_at on non-branded
+pages. JSON-LD is one selector lookup that gives us five fields at
+once.
+
+**Consequence:** `combine_extracted` is unit-tested without a browser
+(`tests/integrations/hh/test_job_page.py`). The feed worker also gets
+a `try/except` around each detail fetch so one broken page no longer
+aborts the scan and the remaining cards still go from `discovered` to
+`detailed`.

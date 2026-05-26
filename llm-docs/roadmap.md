@@ -94,17 +94,20 @@ Validation (operator, 2026-05-26):
       followed by a "Посмотреть N вакансий" button. Full feed is
       paginated SERP at `/search/vacancy?resume=<id>&…`. See D-019.
 
-## Phase 2.1 — paginated SERP crawl  [ ] planned
+## Phase 2.1 — paginated SERP crawl  [~] in progress
 
-- [ ] On main-page load, parse every
+Code landed 2026-05-26 (same day as Phase 2). Validation against
+live HH still owed.
+
+- [x] On main-page load, parse every
       `a[data-qa="applicant-index-search-all-results-button"]` to
       collect one feed URL per active resume; extract `resume=<id>`
       from each URL and persist it as `feed_resume_hint` on every
       card harvested from that URL.
-- [ ] Drive pagination by `&page=N` on the SERP URL, not by
+- [x] Drive pagination by `&page=N` on the SERP URL, not by
       scrolling. Reuse D-018's stop conditions: stop on first known
-      `hh_id` or after `max_pages` (rename `--max-scrolls` →
-      `--max-pages` in the CLI).
+      `hh_id` or after `max_pages`. CLI flag renamed
+      `--max-scrolls` → `--max-pages`.
 - [ ] Low-cadence run for ≥1 week. Goal: selectors stay stable,
       HH does not flag the traffic, posted_at extraction holds.
 

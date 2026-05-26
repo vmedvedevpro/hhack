@@ -1,9 +1,11 @@
-"""Feed worker — Phase 2 read-only discovery pass.
+"""Feed worker — Phase 2.1 read-only discovery pass.
 
-``hhack-feed scan`` opens the persistent browser, scrolls the
-personalized main-page feed, persists new cards, then opens each new
-vacancy page (paced) and fills in the detail fields. Apply / cover
-letter / chat behavior lives in later phases.
+``hhack-feed scan`` opens the persistent browser, collects every
+"Посмотреть N вакансий" button from the main page (one per resume HH
+is recommending against), walks the paginated SERP behind each one,
+persists new cards, then opens each new vacancy page (paced) and fills
+in the detail fields. Apply / cover letter / chat behavior lives in
+later phases.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from hhack.logging import setup_logging
 ARTIFACTS_DIR = Path("artifacts")
 
 
-async def _scan(*, max_scrolls: int, max_details: int, dump: bool) -> None:
+async def _scan(*, max_pages: int, max_details: int, dump: bool) -> None:
     bound = logger.bind(worker="feed")
     repo = build_job_repository(settings)
     dump_dir = ARTIFACTS_DIR if dump else None
@@ -36,7 +38,7 @@ async def _scan(*, max_scrolls: int, max_details: int, dump: bool) -> None:
         new_cards = await discover_new_cards(
             page,
             repo,
-            max_scrolls=max_scrolls,
+            max_pages=max_pages,
             dump_dir=dump_dir,
         )
         inserted = await repo.upsert_feed_cards(new_cards)
@@ -44,6 +46,7 @@ async def _scan(*, max_scrolls: int, max_details: int, dump: bool) -> None:
 
         pending = await repo.list_pending_details(limit=max_details)
         bound.info("opening {n} vacancy pages (max_details={cap})", n=len(pending), cap=max_details)
+        failed: list[int] = []
         for i, job in enumerate(pending):
             if i > 0:
                 pause = random.uniform(
@@ -52,10 +55,23 @@ async def _scan(*, max_scrolls: int, max_details: int, dump: bool) -> None:
                 )
                 bound.info("pause {p:.1f}s before next page", p=pause)
                 await asyncio.sleep(pause)
-            details = await fetch_job_details(page, job.hh_id)
-            saved = await repo.save_details(details)
-            if not saved:
-                bound.warning("save_details affected 0 rows for hh_id={id}", id=job.hh_id)
+            try:
+                details = await fetch_job_details(page, job.hh_id)
+                saved = await repo.save_details(details)
+                if not saved:
+                    bound.warning("save_details affected 0 rows for hh_id={id}", id=job.hh_id)
+            except Exception:
+                # One bad detail page must not abort the whole scan — log
+                # the traceback, remember the hh_id, and keep going. The
+                # next scan picks the row up again because status stays
+                # 'discovered' until save_details runs.
+                failed.append(job.hh_id)
+                bound.opt(exception=True).error(
+                    "fetch_job_details crashed for hh_id={id} — continuing",
+                    id=job.hh_id,
+                )
+        if failed:
+            bound.warning("{n} detail fetch(es) failed: {ids}", n=len(failed), ids=failed)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -63,10 +79,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     scan = sub.add_parser("scan", help="single discovery pass over the personalized feed")
     scan.add_argument(
-        "--max-scrolls",
+        "--max-pages",
         type=int,
         default=10,
-        help="maximum number of scroll cycles before giving up on finding a known job",
+        help="maximum number of SERP pages per resume before giving up on finding a known job",
     )
     scan.add_argument(
         "--max-details",
@@ -88,7 +104,7 @@ def main() -> None:
     if args.command == "scan":
         asyncio.run(
             _scan(
-                max_scrolls=args.max_scrolls,
+                max_pages=args.max_pages,
                 max_details=args.max_details,
                 dump=not args.no_dump,
             )
