@@ -216,3 +216,25 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# hhack-specific
+
+# Persistent Chromium user-data directory. See llm-docs/decisions.md D-013.
+profile/
+
+# Resume files are operator-specific. Only example_*.md ship in the repo.
+resumes/*
+!resumes/example_*.md
+
+# Local IDE workspace files.
+*.code-workspace
+
+# JetBrains IDEs.
+.idea/
+
+# Cursor.
+.cursorignore
+.cursorindexingignore
+
+# Claude Code local state.
+.claude/
