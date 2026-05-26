@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import random
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,27 @@ from hhack.persistence import JobRepositoryProtocol, MatchRepositoryProtocol
 ARTIFACTS_DIR = Path("artifacts")
 
 
+def _make_hh_pacer(bound: Any) -> Callable[[], Awaitable[None]]:
+    """Build a pacer that sleeps before every HH browser action after the first.
+
+    Jitters around ``settings.min_seconds_between_actions``. Anthropic / DB
+    calls bypass it on purpose — only browser-side actions are visible to HH.
+    """
+    state = {"has_acted": False}
+
+    async def _wait() -> None:
+        if state["has_acted"]:
+            pause = random.uniform(
+                settings.min_seconds_between_actions * 0.7,
+                settings.min_seconds_between_actions * 1.3,
+            )
+            bound.info("pause {p:.1f}s before next HH action", p=pause)
+            await asyncio.sleep(pause)
+        state["has_acted"] = True
+
+    return _wait
+
+
 async def _process_job(
     job: Job,
     *,
@@ -56,10 +78,13 @@ async def _process_job(
     matcher: Matcher | None,
     resumes: list[Resume],
     threshold: float,
+    before_hh_action: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     bound = logger.bind(worker="feed", hh_id=job.hh_id, job_id=job.id)
 
     if job.status == "discovered":
+        if before_hh_action is not None:
+            await before_hh_action()
         details = await fetch_job_details(page, job.hh_id)
         saved = await job_repo.save_details(details)
         if not saved:
@@ -130,15 +155,9 @@ async def _scan(*, max_pages: int, max_details: int, dump: bool, no_match: bool)
         pending = await job_repo.list_processable(limit=max_details)
         bound.info("processing {n} jobs (cap={cap})", n=len(pending), cap=max_details)
 
+        pacer = _make_hh_pacer(bound)
         failed: list[int] = []
-        for i, job in enumerate(pending):
-            if i > 0:
-                pause = random.uniform(
-                    settings.min_seconds_between_actions * 0.7,
-                    settings.min_seconds_between_actions * 1.3,
-                )
-                bound.info("pause {p:.1f}s before next job", p=pause)
-                await asyncio.sleep(pause)
+        for job in pending:
             try:
                 await _process_job(
                     job,
@@ -148,6 +167,7 @@ async def _scan(*, max_pages: int, max_details: int, dump: bool, no_match: bool)
                     matcher=matcher,
                     resumes=resumes,
                     threshold=settings.match_threshold,
+                    before_hh_action=pacer,
                 )
             except Exception:
                 failed.append(job.hh_id)

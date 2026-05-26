@@ -178,6 +178,38 @@ async def test_existing_match_is_not_re_called(monkeypatch: pytest.MonkeyPatch):
     assert job_repo.rows[4].status == "matched"
 
 
+async def test_pacer_called_before_hh_fetch_only(monkeypatch: pytest.MonkeyPatch):
+    """Discovered job → pacer fires; detailed job → pacer does not."""
+    job_repo = FakeJobRepository()
+    match_repo = FakeMatchRepository()
+    await job_repo.upsert_feed_cards([_card(10), _card(11)])
+    await job_repo.save_details(_details(11))  # 11 is already detailed
+
+    matcher, _client = _matcher({"a": 0.9, "b": 0.9})
+    _patch_fetch(monkeypatch, _details(10))
+
+    calls: list[int] = []
+
+    async def pacer() -> None:
+        calls.append(1)
+
+    jobs = sorted(await job_repo.list_processable(limit=10), key=lambda j: j.hh_id)
+    for job in jobs:
+        await feed_worker._process_job(
+            job,
+            page=None,
+            job_repo=job_repo,
+            match_repo=match_repo,
+            matcher=matcher,
+            resumes=RESUMES,
+            threshold=0.65,
+            before_hh_action=pacer,
+        )
+
+    # 10 is discovered → pacer fired once; 11 was already detailed → no extra HH call.
+    assert len(calls) == 1
+
+
 async def test_matcher_disabled_keeps_job_in_detailed(monkeypatch: pytest.MonkeyPatch):
     job_repo = FakeJobRepository()
     match_repo = FakeMatchRepository()
