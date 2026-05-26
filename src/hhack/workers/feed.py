@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import random
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,7 @@ from hhack.logging import setup_logging
 from hhack.matching.matcher import Matcher
 from hhack.matching.resume import Resume, resumes_cache_dir
 from hhack.persistence import JobRepositoryProtocol, MatchRepositoryProtocol
+from hhack.tools.match_export import export_matches_to_markdown
 
 ARTIFACTS_DIR = Path("artifacts")
 
@@ -256,6 +258,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "sync-resumes",
         help="pull every applicant-zone resume from HH and write it to the cache dir",
     )
+    export = sub.add_parser(
+        "export-matches",
+        help="dump match_results joined with jobs into a markdown review file",
+    )
+    export.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="output path (default: ./artifacts/match-review-<ts>.md)",
+    )
+    export.add_argument(
+        "--status",
+        action="append",
+        choices=("matched", "skipped", "detailed", "discovered"),
+        help="filter by job status; repeat to include several. Default: matched + skipped.",
+    )
+    export.add_argument(
+        "--all-jobs",
+        action="store_true",
+        help="include jobs without any match_results (default: skip them)",
+    )
     return parser
 
 
@@ -274,6 +297,19 @@ def main() -> None:
         return
     if args.command == "sync-resumes":
         asyncio.run(_sync_resumes())
+        return
+    if args.command == "export-matches":
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        output = args.output or ARTIFACTS_DIR / f"match-review-{stamp}.md"
+        statuses = args.status if args.status else ["matched", "skipped"]
+        asyncio.run(
+            export_matches_to_markdown(
+                settings,
+                output_path=output,
+                statuses=statuses,
+                only_with_matches=not args.all_jobs,
+            )
+        )
         return
     logger.bind(worker="feed").info("no command given — try `hhack-feed --help`")
 
