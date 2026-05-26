@@ -10,6 +10,11 @@ and delete the question from here.
   cycle: scroll N pages and stop, or scroll until we hit jobs already
   in `jobs` (known `hh_id`)? Probably the latter, confirm against the
   live site.
+- **Fingerprint baseline.** Operator must run `hhack-browser fingerprint`
+  on their own machine and confirm bot.sannysoft.com rows look normal
+  before any feed automation runs against HH. If anything red shows
+  up, record findings (and any extra patches required) as a new
+  decision before unblocking Phase 2.
 
 ## Blocking before Phase 3
 

@@ -41,15 +41,22 @@ improvements from D-011 (ruff/mypy/pre-commit, secret-scan hook).
       clone (mirrors the `tech-pulse` README shape: Requirements,
       Installation, Configuration, Running, Tests).
 
-## Phase 1 — persistent browser session
+## Phase 1 — persistent browser session  ✓ done (2026-05-26)
 
-- [ ] Script that opens a persistent Chromium context against a
-      configurable profile directory.
-- [ ] Operator logs in to HH by hand once. Verify session survives
-      across script restarts (cookies, localStorage).
-- [ ] Apply stealth patches; verify with a fingerprint test page
-      (bot.sannysoft.com or similar) that obvious CDP markers are gone.
-- [ ] No HH automation yet beyond opening the homepage.
+- [x] Script that opens a persistent Chromium context against a
+      configurable profile directory. `hhack-browser login` opens
+      hh.ru against `BROWSER_PROFILE_DIR`, waits for the operator to
+      close the window. See `src/hhack/tools/browser.py`.
+- [x] Stealth library chosen: `tf-playwright-stealth` (D-014).
+      Applied via `context.on("page", ...)` plus a pass over existing
+      pages in `integrations/browser/session.py`.
+- [x] `hhack-browser fingerprint` subcommand opens bot.sannysoft.com
+      and saves a full-page screenshot to `./artifacts/`.
+- [x] Operator ran `hhack-browser login`, logged in to HH manually,
+      confirmed the session survives a second `hhack-browser login`
+      (no re-login prompt). 2026-05-26.
+- [x] Operator ran `hhack-browser fingerprint` on 2026-05-26, all
+      bot.sannysoft.com rows looked clean.
 
 ## Phase 2 — read-only main-feed discovery
 

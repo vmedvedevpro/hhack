@@ -222,6 +222,9 @@ __marimo__/
 # Persistent Chromium user-data directory. See llm-docs/decisions.md D-013.
 profile/
 
+# Browser screenshots, fingerprint snapshots, HTML dumps. Operator-specific.
+artifacts/
+
 # Resume files are operator-specific. Only example_*.md ship in the repo.
 resumes/*
 !resumes/example_*.md

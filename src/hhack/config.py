@@ -1,19 +1,30 @@
 from pydantic import field_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    anthropic_api_key: str
+    # Anthropic API key is only required for phases that call the LLM
+    # (3+). Browser-only commands (Phase 1) start without it.
+    anthropic_api_key: str | None = None
     anthropic_match_model: str = "claude-sonnet-4-6"
     anthropic_letter_model: str = "claude-haiku-4-5-20251001"
     anthropic_chat_model: str = "claude-sonnet-4-6"
 
-    database_url: str
+    # Postgres URL is only required once we start writing jobs / matches /
+    # applications (Phase 2+). Leave blank until then.
+    database_url: str | None = None
     alembic_database_url: str | None = None
 
     browser_profile_dir: str = "./profile"
-    resume_a_path: str
-    resume_b_path: str
+    browser_user_agent: str | None = None
+    browser_locale: str | None = None
+    browser_timezone: str | None = None
+    browser_viewport_width: int = 1440
+    browser_viewport_height: int = 900
+
+    # Resume paths are only required once the matcher runs (Phase 3+).
+    resume_a_path: str | None = None
+    resume_b_path: str | None = None
 
     match_threshold: float = 0.65
     max_applications_per_day: int = 20
@@ -23,7 +34,7 @@ class Settings(BaseSettings):
     dry_run: bool = True
     log_level: str = "INFO"
 
-    model_config = {"env_file": ".env"}
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @field_validator("database_url", "alembic_database_url", mode="before")
     @classmethod

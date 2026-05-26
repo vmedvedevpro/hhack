@@ -12,11 +12,13 @@ dependencies = [
     "asyncpg>=0.31.0",
     "alembic>=1.18.4",
     "playwright>=1.50.0",
+    "tf-playwright-stealth>=1.2.0",
 ]
 
 [project.scripts]
 hhack-feed = "hhack.workers.feed:main"
 hhack-chat = "hhack.workers.chat:main"
+hhack-browser = "hhack.tools.browser:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -60,6 +62,7 @@ python_version = "3.11"
 strict = true
 files = ["src"]
 exclude = ["migrations/versions"]
+plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
 module = ["playwright.*", "playwright_stealth.*"]

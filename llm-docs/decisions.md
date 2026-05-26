@@ -247,3 +247,34 @@ safe.
 first commit. Any operator running multiple checkouts gets multiple
 profiles by default — they can point all checkouts at one shared
 external path by overriding `BROWSER_PROFILE_DIR` in their `.env`.
+
+---
+
+## D-014 · 2026-05-26 · `tf-playwright-stealth` for CDP fingerprint masking
+
+**Decision:** Apply stealth patches via the `tf-playwright-stealth`
+package (the actively-maintained fork of the original
+`playwright-stealth`). Patches are applied per page via
+`stealth_async(page)` in two places:
+
+- For every page already present when the persistent context opens.
+- For every new page via `context.on("page", ...)`.
+
+**Reasoning:** Native Python port, ships via `uv add`, covers the
+main CDP markers (`navigator.webdriver`, `chrome.runtime`, vendor
+strings, WebGL fingerprint, plugins, languages). Sufficient for HH,
+which is not behind aggressive bot management like Cloudflare Turnstile.
+
+**Alternative considered:** `rebrowser-patches`. Patches the Playwright
+runtime itself and masks deeper CDP leaks (`Runtime.enable`), but it
+is an npm package — no native Python distribution. Out of proportion
+for HH; revisit only if HH starts probing for the leaks tf-stealth
+doesn't cover.
+
+**Consequence:** `pyproject.toml` pins
+`tf-playwright-stealth>=1.2.0`. The mypy override for
+`playwright_stealth.*` already exists from Phase 0. If HH detects
+the bot in spite of this, the first move is to set
+`BROWSER_USER_AGENT` / `BROWSER_LOCALE` / `BROWSER_TIMEZONE` to match
+the operator's real browser exactly — most fingerprint detections
+hit the UA/locale mismatch before any deep CDP probe.
