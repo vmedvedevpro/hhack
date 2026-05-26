@@ -58,23 +58,55 @@ improvements from D-011 (ruff/mypy/pre-commit, secret-scan hook).
 - [x] Operator ran `hhack-browser fingerprint` on 2026-05-26, all
       bot.sannysoft.com rows looked clean.
 
-## Phase 2 — read-only main-feed discovery
+## Phase 2 — read-only main-feed discovery (teaser only)  ✓ done (2026-05-26)
 
 Source is the personalized feed on hh.ru's main page, not a search
-URL. See D-008.
+URL. See D-008. The "full feed" via `/search/vacancy?resume=<id>` is
+deferred to Phase 2.1 (D-019).
 
-- [ ] Parse main-page feed cards: extract card-level fields (hh_id,
-      title, company, snippet, url).
-- [ ] Handle infinite scroll: scroll until we hit an `hh_id` already
-      stored (incremental crawl) or until a configured ceiling.
-- [ ] Observe whether the feed reflects both resumes or only one,
-      and capture which (settles an open question — record findings
-      in a decision entry).
-- [ ] Open each job page, extract full description and structured
-      fields (salary, location, employment type).
-- [ ] Persist everything to `jobs` table. Idempotent on `hh_id`.
-- [ ] Run for several days at a low cadence. Goal: confirm selectors
-      are stable and HH does not flag the traffic.
+Code-side (landed 2026-05-26):
+
+- [x] `jobs` table + initial migration (`migrations/versions/0_initial.py`),
+      idempotency anchor `hh_id`. Schema in D-015.
+- [x] `JobRepositoryProtocol` + `SQLAlchemyJobRepository` with
+      Postgres `ON CONFLICT DO NOTHING` upsert. `FakeJobRepository`
+      for unit tests.
+- [x] Main-page feed parser (`integrations/hh/feed.py`): URL-anchored
+      card harvester (D-016), card-root anchor via
+      `getElementById(hh_id)` chain (D-020), scroll-until-known with
+      configurable ceiling (D-018), optional diagnostic dump of
+      HTML+JSON to `./artifacts/` for selector validation (D-017).
+- [x] Vacancy detail parser (`integrations/hh/job_page.py`):
+      full_text, salary, location, employment_type, posted_at.
+- [x] `hhack-feed scan` worker — single discovery pass with paced
+      detail fetches (`min_seconds_between_actions` ±30% jitter).
+
+Validation (operator, 2026-05-26):
+
+- [x] `docker compose up -d` and `uv run alembic upgrade head`
+      applied 0_initial cleanly.
+- [x] First diagnostic scan caught a card-root scoping bug
+      (`closest('[data-qa*="serp"]')` matched the title link
+      itself) — fixed; second scan filled `company` for all rows.
+      `snippet` legitimately stays `NULL` (main feed has no snippet
+      block) and is filled from the detail page's `full_text`.
+- [x] Discovered that the main page only shows ~5 teaser cards
+      followed by a "Посмотреть N вакансий" button. Full feed is
+      paginated SERP at `/search/vacancy?resume=<id>&…`. See D-019.
+
+## Phase 2.1 — paginated SERP crawl  [ ] planned
+
+- [ ] On main-page load, parse every
+      `a[data-qa="applicant-index-search-all-results-button"]` to
+      collect one feed URL per active resume; extract `resume=<id>`
+      from each URL and persist it as `feed_resume_hint` on every
+      card harvested from that URL.
+- [ ] Drive pagination by `&page=N` on the SERP URL, not by
+      scrolling. Reuse D-018's stop conditions: stop on first known
+      `hh_id` or after `max_pages` (rename `--max-scrolls` →
+      `--max-pages` in the CLI).
+- [ ] Low-cadence run for ≥1 week. Goal: selectors stay stable,
+      HH does not flag the traffic, posted_at extraction holds.
 
 ## Phase 3 — match logic (no applications yet)
 

@@ -4,17 +4,23 @@ Things that need a decision before the relevant phase starts. Resolve
 during a working session, then move the resolution into `decisions.md`
 and delete the question from here.
 
-## Blocking before Phase 2
+## Blocking before Phase 2 — all resolved
 
-- **Feed pagination strategy.** The main feed is scroll-based. Per
-  cycle: scroll N pages and stop, or scroll until we hit jobs already
-  in `jobs` (known `hh_id`)? Probably the latter, confirm against the
-  live site.
-- **Fingerprint baseline.** Operator must run `hhack-browser fingerprint`
-  on their own machine and confirm bot.sannysoft.com rows look normal
-  before any feed automation runs against HH. If anything red shows
-  up, record findings (and any extra patches required) as a new
-  decision before unblocking Phase 2.
+- ~~Feed pagination strategy.~~ Resolved as
+  [D-018](decisions.md#d-018--2026-05-26--pagination-scroll-until-known-hh_id-is-seen-with-hard-ceiling).
+- ~~Fingerprint baseline.~~ Operator confirmed clean fingerprint on
+  2026-05-26 (see Phase 1 session log).
+
+## Resolved during Phase 2
+
+- ~~**`feed_resume_hint` capture.**~~ Resolved 2026-05-26. HH does
+  not put a per-card resume label on the feed cards themselves —
+  the per-resume attribution lives in the URL of the "Посмотреть N
+  вакансий" button (`/search/vacancy?resume=<id>&…`). See
+  [D-019](decisions.md#d-019--2026-05-26--main-page-is-a-teaser-real-feed-lives-at-searchvacancyresumeid).
+  Phase 2.1 will set `feed_resume_hint = <resume_id>` from that URL.
+  At apply time HH lets the operator pick a resume regardless of
+  source, so the hint is informational only.
 
 ## Blocking before Phase 3
 
