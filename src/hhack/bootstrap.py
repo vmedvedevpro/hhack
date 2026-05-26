@@ -15,11 +15,14 @@ from hhack.integrations.anthropic_client import (
     AnthropicClientProtocol,
     AsyncAnthropicClient,
 )
+from hhack.matching.letter_writer import LetterWriter
 from hhack.matching.matcher import Matcher
 from hhack.matching.resume import Resume, load_resumes
 from hhack.persistence import (
+    ApplicationRepositoryProtocol,
     JobRepositoryProtocol,
     MatchRepositoryProtocol,
+    SQLAlchemyApplicationRepository,
     SQLAlchemyJobRepository,
     SQLAlchemyMatchRepository,
     create_session_factory,
@@ -50,6 +53,10 @@ def build_match_repository(settings: Settings) -> MatchRepositoryProtocol:
     return SQLAlchemyMatchRepository(_session_factory(settings))
 
 
+def build_application_repository(settings: Settings) -> ApplicationRepositoryProtocol:
+    return SQLAlchemyApplicationRepository(_session_factory(settings))
+
+
 def build_anthropic_client(settings: Settings) -> AnthropicClientProtocol:
     if not settings.anthropic_api_key:
         raise RuntimeError(
@@ -61,6 +68,10 @@ def build_anthropic_client(settings: Settings) -> AnthropicClientProtocol:
 
 def build_matcher(settings: Settings, client: AnthropicClientProtocol) -> Matcher:
     return Matcher(client=client, model=settings.anthropic_match_model)
+
+
+def build_letter_writer(settings: Settings, client: AnthropicClientProtocol) -> LetterWriter:
+    return LetterWriter(client=client, model=settings.anthropic_letter_model)
 
 
 def build_resumes(settings: Settings) -> list[Resume]:

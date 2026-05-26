@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from itertools import count
 
 from hhack.domain.job import Job
+from hhack.matching.letter_writer import LetterDraft
 from hhack.matching.matcher import MatchResult
 from hhack.persistence.job_repository import FeedCard, JobDetails
 
@@ -105,3 +106,25 @@ class FakeMatchRepository:
     async def best_score(self, job_id: int) -> float | None:
         scores = [r.score for r in self.rows if r.job_id == job_id]
         return max(scores) if scores else None
+
+    async def best_match(self, job_id: int) -> MatchResult | None:
+        rows = [r for r in self.rows if r.job_id == job_id]
+        if not rows:
+            return None
+        return max(rows, key=lambda r: r.score)
+
+
+class FakeApplicationRepository:
+    """In-memory ``ApplicationRepositoryProtocol`` for tests."""
+
+    def __init__(self) -> None:
+        self.rows: list[LetterDraft] = []
+
+    async def exists(self, *, job_id: int, prompt_hash: str) -> bool:
+        return any(r.job_id == job_id and r.prompt_hash == prompt_hash for r in self.rows)
+
+    async def save(self, draft: LetterDraft) -> bool:
+        if await self.exists(job_id=draft.job_id, prompt_hash=draft.prompt_hash):
+            return False
+        self.rows.append(draft)
+        return True

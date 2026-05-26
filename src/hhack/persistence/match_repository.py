@@ -29,6 +29,9 @@ class MatchRepositoryProtocol(Protocol):
     async def best_score(self, job_id: int) -> float | None:
         """Max ``score`` across every match row for this job, or None if none exist."""
 
+    async def best_match(self, job_id: int) -> MatchResult | None:
+        """Return the highest-scoring match row for the job, or None."""
+
 
 class SQLAlchemyMatchRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -75,6 +78,31 @@ class SQLAlchemyMatchRepository:
             )
             value = result.scalar_one_or_none()
             return float(value) if value is not None else None
+
+    async def best_match(self, job_id: int) -> MatchResult | None:
+        async with self._factory() as session:
+            stmt = (
+                select(MatchResultRow)
+                .where(MatchResultRow.job_id == job_id)
+                .order_by(MatchResultRow.score.desc())
+                .limit(1)
+            )
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            if row is None:
+                return None
+            return MatchResult(
+                job_id=row.job_id,
+                resume_id=row.resume_id,
+                model=row.model,
+                prompt_hash=row.prompt_hash,
+                score=float(row.score),
+                rationale=row.rationale,
+                payload=row.payload,
+                input_tokens=row.input_tokens,
+                output_tokens=row.output_tokens,
+                cache_read_input_tokens=row.cache_read_input_tokens,
+                cache_creation_input_tokens=row.cache_creation_input_tokens,
+            )
 
 
 __all__ = ["MatchRepositoryProtocol", "SQLAlchemyMatchRepository"]

@@ -36,12 +36,16 @@ and delete the question from here.
   turns out to be poor after the manual-review pass. See
   [D-023](decisions.md#d-023--2026-05-26--match-logic-plain-markdown-resumes-single-score-with-breakdown-matcher-inline-in-scan).
 
+## Resolved during Phase 4
+
+- ~~**Cover letter language detection.**~~ Resolved 2026-05-26 — the
+  model mirrors the posting's language on its own; we pass the full
+  vacancy text and a one-line instruction in `LETTER_RULES`. No
+  separate detect step. See
+  [D-026](decisions.md#d-026--2026-05-26--cover-letter-generation--prompts-as-code-tool-use-inline-в-scan-best-score-resume).
+
 ## Blocking before Phase 5
 
-- **Cover letter language detection.** HH job postings can be Russian
-  or English. The cover letter must match the posting's language. Add
-  a language-detect step before generation, or pass the full posting
-  and let the LLM mirror its language?
 - **What counts as "applied successfully"?** HH application flow has
   multiple states (sent, viewed, in chat, rejected, archived). Which
   of those does `applications.status=sent` represent, and how do we

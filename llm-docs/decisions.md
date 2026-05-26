@@ -756,3 +756,112 @@ place that's read by both the API and our validator.
 - `FakeAnthropicClient` gets `create_tool_call` + `fake_tool_call`
   helper. Both `create_message` and `create_tool_call` share the same
   canned-response stream so existing tests don't need to choose paths.
+
+---
+
+## D-026 · 2026-05-26 · Cover letter generation — prompts-as-code, tool use, inline-в-scan, best-score-resume
+
+**Decision:** Phase 4 lays down the cover-letter pipeline with the
+following shape:
+
+1. **Source of truth for the prompt** — `LETTER_RULES`,
+   `LETTER_TOOL_SCHEMA` and `BANNED_PHRASES` live as constants in
+   `matching/letter_prompts.py` (mirroring `prompts.py` for the
+   matcher). No template file on disk; no DB-managed prompt.
+2. **Output via tool use** — same reason as D-025. `LetterWriter`
+   forces a `submit_cover_letter` tool call returning
+   `{body: string, language: "ru"|"en"}`. Body length, banned-phrase
+   list, structure are all in the rules text; the tool schema only
+   guarantees we get parsable input.
+3. **Inline in `hhack-feed scan`** — after `mark_matched(job.id)` the
+   worker generates a letter for the best-scoring resume and persists
+   to `applications` (status `draft`). Same single-thread human cadence
+   D-023 already established for matching. `--no-letter` opt-out.
+4. **Best-scoring resume wins** — `MatchRepository.best_match(job_id)`
+   returns the row with the highest `score`. The resume from the local
+   cache with the matching `resume_id` is fed into the letter prompt.
+   Single letter per `(job, prompt_hash)` — no per-resume drafts.
+5. **Language detection is the model's job** — the prompt instructs
+   "пиши на том же языке, что и вакансия", and Sonnet/Haiku handle
+   this reliably. No separate detection step. Closes the Phase 5
+   blocker question.
+
+**Reasoning:**
+
+- *Prompts-as-code* gives versioning, code review, and a clean bump
+  path via `LETTER_VERSION` for idempotency. A separate file would
+  spread the prompt across two storage layers without a real win.
+- *Tool use* is now the default for any structured Anthropic call in
+  this codebase. We learned that the hard way in D-025 — no reason to
+  re-learn for letters where the body is multi-line prose (worst case
+  for free-form JSON).
+- *Inline-в-scan* keeps the visible HH cadence intact (open → details
+  → match → letter → next). Letter generation does not touch HH, so
+  the HH-pacer from `_make_hh_pacer` does **not** apply to it; LLM
+  calls run back-to-back. A separate `draft-letters` command would
+  add a second LLM-only pass that doesn't fit the "one human session"
+  story we've kept consistent through Phases 2-3.
+- *Best-scoring resume* is the simplest answer that uses information
+  the matcher already produces. If we end up wanting multiple drafts
+  per vacancy (e.g. operator review of both .NET and LLM letters for
+  borderline scores), we'd add a second draft per resume by widening
+  the uniqueness key — easy follow-up if needed.
+
+**Plumbing consequences:**
+
+- New table `applications` (`migration 3_applications.py`) with
+  `UNIQUE (job_id, prompt_hash)`. Status defaults to `draft`; Phase 5
+  will move rows to `pending` / `sent` / `failed` and stamp `sent_at`
+  / `hh_response_id`.
+- `match_results.best_match(job_id)` added to the repository protocol
+  so the worker can fetch the winning row + rationale for the letter
+  prompt without re-doing the score arithmetic.
+- `bootstrap.py` gains `build_letter_writer` and
+  `build_application_repository`. The Anthropic client is reused
+  between matcher and letter writer (same `AsyncAnthropicClient`
+  instance, different model — Sonnet for matcher, Haiku for letter as
+  per `architecture.md`).
+- Worker `_process_job` accepts optional `letter_writer` /
+  `application_repo`. If either is `None` the letter step is skipped
+  (the `--no-letter` CLI flag flips both off together). This keeps
+  existing matcher tests untouched.
+- `hhack-feed export-letters` writes a markdown review file under
+  `artifacts/letter-review-<ts>.md` so the operator can read 50+
+  drafts end-to-end before Phase 5 toggles `DRY_RUN=false`.
+
+**Alternatives considered:**
+
+- *Separate `hhack-feed draft-letters` command.* Rejected for the
+  same reason matcher stays inline: two-pass flow is a recognizable
+  bot pattern, single-pass mirrors a human reviewing the feed.
+- *Per-resume drafts.* Rejected for Phase 4 — adds review burden
+  before we have any operator feedback that two-letter-per-vacancy
+  even matters. Trivial to enable later by widening the unique
+  constraint to `(job_id, resume_id, prompt_hash)`.
+- *Templates with explicit slot placeholders.* Rejected; the model
+  composes better when given a description of intent + banned
+  phrases than when forced to fill `[GREETING]` / `[BODY]` literals.
+
+**Subsequent calibration (same day, post-ramp):**
+
+- `LETTER_RULES` iterated v1 → v5 against the operator's real matched
+  vacancies. Each version targeted concrete failure modes the operator
+  flagged on the previous draft batch (no greeting, em dash, generic
+  opening "Интересует вакансия X", "Интересует возможность Y", numeric
+  N/5 self-rating dumps, "погрузиться" as self-praise). Final v5
+  includes a `Reliable working pattern` calibration anchor + complete
+  example body to nudge the model into the desired shape rather than
+  just banning the failure modes.
+- Letter writer instructions are now in English even though the output
+  language stays mirrored from the vacancy (Russian in our corpus).
+  Sonnet/Haiku follow long English rule lists noticeably better than
+  the same content in Russian.
+- **Default letter model switched to `claude-sonnet-4-6`** (was Haiku
+  4.5 per the initial plan in `architecture.md`). Side-by-side on the
+  same 10 vacancies with the same letter-v5 rules: Haiku violated 4
+  rule families in 10 letters (em dash 4/10, "Интересует возможность"
+  2/10, numeric N/5 dump 1/10, "погрузиться" 1/10); Sonnet was 0/10.
+  Sonnet is ~10x more expensive per token, but at the configured 20
+  letters/day cap the cost delta is negligible compared to the review
+  burden Haiku violations would create. Operator can override via
+  `ANTHROPIC_LETTER_MODEL` if they want to retest.

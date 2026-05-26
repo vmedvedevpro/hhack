@@ -5,12 +5,17 @@ from pathlib import Path
 
 import pytest
 
+from hhack.matching.letter_writer import LetterWriter
 from hhack.matching.matcher import Matcher
 from hhack.matching.resume import Resume
 from hhack.persistence.job_repository import FeedCard, JobDetails
 from hhack.workers import feed as feed_worker
 from tests.integrations.fakes import FakeAnthropicClient, fake_tool_call
-from tests.persistence.fakes import FakeJobRepository, FakeMatchRepository
+from tests.persistence.fakes import (
+    FakeApplicationRepository,
+    FakeJobRepository,
+    FakeMatchRepository,
+)
 
 RESUMES = [
     Resume(id="a", path=Path("/tmp/a.md"), content="resume A"),
@@ -62,6 +67,11 @@ def _matcher(scores: dict[str, float]) -> tuple[Matcher, FakeAnthropicClient]:
 
     client = FakeAnthropicClient(_respond)
     return Matcher(client=client, model="claude-sonnet-4-6"), client
+
+
+def _letter_writer(body: str = "Готов обсудить", language: str = "ru") -> tuple[LetterWriter, FakeAnthropicClient]:
+    client = FakeAnthropicClient([fake_tool_call({"body": body, "language": language})])
+    return LetterWriter(client=client, model="claude-haiku-4-5-20251001"), client
 
 
 async def test_discovered_job_flows_through_to_matched(monkeypatch: pytest.MonkeyPatch):
@@ -229,3 +239,109 @@ async def test_matcher_disabled_keeps_job_in_detailed(monkeypatch: pytest.Monkey
 
     assert job_repo.rows[5].status == "detailed"
     assert match_repo.rows == []
+
+
+async def test_letter_drafted_for_matched_job(monkeypatch: pytest.MonkeyPatch):
+    job_repo = FakeJobRepository()
+    match_repo = FakeMatchRepository()
+    application_repo = FakeApplicationRepository()
+    await job_repo.upsert_feed_cards([_card(20)])
+    matcher, _mclient = _matcher({"a": 0.9, "b": 0.4})
+    writer, wclient = _letter_writer()
+    _patch_fetch(monkeypatch, _details(20))
+
+    job = (await job_repo.list_processable(limit=10))[0]
+    await feed_worker._process_job(
+        job,
+        page=None,
+        job_repo=job_repo,
+        match_repo=match_repo,
+        matcher=matcher,
+        resumes=RESUMES,
+        threshold=0.65,
+        application_repo=application_repo,
+        letter_writer=writer,
+    )
+
+    assert job_repo.rows[20].status == "matched"
+    assert len(application_repo.rows) == 1
+    draft = application_repo.rows[0]
+    # The higher-scoring resume (slot "a", score 0.9) wins.
+    assert draft.resume_id == "a"
+    assert draft.cover_letter == "Готов обсудить"
+    assert draft.language == "ru"
+    assert len(wclient.calls) == 1
+
+
+async def test_letter_not_drafted_when_job_skipped(monkeypatch: pytest.MonkeyPatch):
+    job_repo = FakeJobRepository()
+    match_repo = FakeMatchRepository()
+    application_repo = FakeApplicationRepository()
+    await job_repo.upsert_feed_cards([_card(21)])
+    matcher, _mclient = _matcher({"a": 0.3, "b": 0.2})
+    writer, wclient = _letter_writer()
+    _patch_fetch(monkeypatch, _details(21))
+
+    job = (await job_repo.list_processable(limit=10))[0]
+    await feed_worker._process_job(
+        job,
+        page=None,
+        job_repo=job_repo,
+        match_repo=match_repo,
+        matcher=matcher,
+        resumes=RESUMES,
+        threshold=0.65,
+        application_repo=application_repo,
+        letter_writer=writer,
+    )
+
+    assert job_repo.rows[21].status == "skipped"
+    assert application_repo.rows == []
+    assert wclient.calls == []
+
+
+async def test_letter_not_redrafted_when_already_exists(monkeypatch: pytest.MonkeyPatch):
+    job_repo = FakeJobRepository()
+    match_repo = FakeMatchRepository()
+    application_repo = FakeApplicationRepository()
+    await job_repo.upsert_feed_cards([_card(22)])
+    matcher, _mclient = _matcher({"a": 0.9, "b": 0.9})
+    writer, wclient = _letter_writer()
+    _patch_fetch(monkeypatch, _details(22))
+
+    job = (await job_repo.list_processable(limit=10))[0]
+
+    # First pass — draft is written.
+    await feed_worker._process_job(
+        job,
+        page=None,
+        job_repo=job_repo,
+        match_repo=match_repo,
+        matcher=matcher,
+        resumes=RESUMES,
+        threshold=0.65,
+        application_repo=application_repo,
+        letter_writer=writer,
+    )
+    assert len(application_repo.rows) == 1
+    assert len(wclient.calls) == 1
+
+    # Simulate an already-matched re-scan: clear job status back to detailed.
+    job_repo.rows[22].status = "detailed"
+    job = (await job_repo.list_processable(limit=10))[0]
+
+    await feed_worker._process_job(
+        job,
+        page=None,
+        job_repo=job_repo,
+        match_repo=match_repo,
+        matcher=matcher,
+        resumes=RESUMES,
+        threshold=0.65,
+        application_repo=application_repo,
+        letter_writer=writer,
+    )
+
+    # No additional letter call; the existing draft stayed.
+    assert len(application_repo.rows) == 1
+    assert len(wclient.calls) == 1

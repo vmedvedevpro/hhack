@@ -149,13 +149,33 @@ Code landed 2026-05-26. See D-024 for the rationale.
 - [ ] Live `sync-resumes` run on the operator's account, followed by
       Phase 3 live validation against the synced markdown.
 
-## Phase 4 — cover letter generation
+## Phase 4 — cover letter generation  [~] in progress
 
-- [ ] Cover letter template with explicit slots.
-- [ ] Generation prompt with hard style/length constraints and
-      anti-pattern examples (banned phrases).
-- [ ] Persist drafts. Operator reviews 50+ end-to-end before any of
-      them get sent.
+Code landed 2026-05-26. Live validation against the operator's real
+matched vacancies still owed.
+
+- [x] Generation prompt with hard style/length constraints (4-6
+      sentences, ≤600 chars target), banned-phrase list, structure
+      hints, calibration example — `matching/letter_prompts.py`
+      (D-026). Tool use forces a parseable `{body, language}` response.
+- [x] Persist drafts to the new `applications` table (status
+      `draft`, idempotent on `(job_id, prompt_hash)`).
+- [x] Letter writer runs inline in `hhack-feed scan` after
+      `mark_matched`, using the best-scoring resume. `--no-letter`
+      opt-out.
+- [x] `hhack-feed export-letters` markdown review.
+- [x] Side-by-side Haiku vs Sonnet on letter-v5 rules (2026-05-26):
+      Haiku violates 4 rules in 10 letters (em dash 4/10, "Интересует
+      возможность" 2/10, numeric 1-5 dump 1/10, "погрузиться" 1/10);
+      Sonnet 0/10. Default model stays `claude-sonnet-4-6`.
+- [ ] Live run: operator reads 50+ end-to-end drafts, calibrates
+      `LETTER_RULES` / banned list. Bump `LETTER_VERSION` per rules
+      change so old drafts survive for comparison.
+- [ ] Letter evals (deferred until the corpus grows past ~50 drafts):
+      rule-based detector first (em dash, banned phrases, length cap,
+      numeric N/M dumps, missing greeting) as a cheap regression gate;
+      LLM-judge across 4 dimensions only if rule-based proves
+      insufficient. Side-by-side A/B harness is a later concern.
 
 ## Phase 5 — application submission (gated)
 

@@ -27,7 +27,9 @@ from loguru import logger
 
 from hhack.bootstrap import (
     build_anthropic_client,
+    build_application_repository,
     build_job_repository,
+    build_letter_writer,
     build_match_repository,
     build_matcher,
     build_resumes,
@@ -42,9 +44,15 @@ from hhack.integrations.hh.resume_page import (
     fetch_resume_markdown,
 )
 from hhack.logging import setup_logging
+from hhack.matching.letter_writer import LetterWriter
 from hhack.matching.matcher import Matcher
 from hhack.matching.resume import Resume, resumes_cache_dir
-from hhack.persistence import JobRepositoryProtocol, MatchRepositoryProtocol
+from hhack.persistence import (
+    ApplicationRepositoryProtocol,
+    JobRepositoryProtocol,
+    MatchRepositoryProtocol,
+)
+from hhack.tools.letter_export import export_letters_to_markdown
 from hhack.tools.match_export import export_matches_to_markdown
 
 ARTIFACTS_DIR = Path("artifacts")
@@ -80,6 +88,8 @@ async def _process_job(
     matcher: Matcher | None,
     resumes: list[Resume],
     threshold: float,
+    application_repo: ApplicationRepositoryProtocol | None = None,
+    letter_writer: LetterWriter | None = None,
     before_hh_action: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     bound = logger.bind(worker="feed", hh_id=job.hh_id, job_id=job.id)
@@ -122,18 +132,67 @@ async def _process_job(
     if best >= threshold:
         await job_repo.mark_matched(job.id)
         bound.info("best score {b:.3f} >= threshold {t:.2f} → matched", b=best, t=threshold)
+        if letter_writer is not None and application_repo is not None:
+            await _draft_letter(
+                job,
+                match_repo=match_repo,
+                application_repo=application_repo,
+                letter_writer=letter_writer,
+                resumes=resumes,
+            )
     else:
         await job_repo.mark_skipped(job.id)
         bound.info("best score {b:.3f} < threshold {t:.2f} → skipped", b=best, t=threshold)
 
 
-async def _scan(*, max_pages: int, max_details: int, dump: bool, no_match: bool) -> None:
+async def _draft_letter(
+    job: Job,
+    *,
+    match_repo: MatchRepositoryProtocol,
+    application_repo: ApplicationRepositoryProtocol,
+    letter_writer: LetterWriter,
+    resumes: list[Resume],
+) -> None:
+    bound = logger.bind(component="letter", hh_id=job.hh_id, job_id=job.id)
+    best_match = await match_repo.best_match(job.id)
+    if best_match is None:
+        bound.warning("no match rows for job — cannot draft letter")
+        return
+    resume = next((r for r in resumes if r.id == best_match.resume_id), None)
+    if resume is None:
+        bound.warning(
+            "best match resume_id={r} not in local cache — run sync-resumes",
+            r=best_match.resume_id,
+        )
+        return
+    prompt_hash = letter_writer.prompt_hash(resume)
+    if await application_repo.exists(job_id=job.id, prompt_hash=prompt_hash):
+        bound.info("letter draft already exists for this prompt; skipping")
+        return
+    draft = await letter_writer.write(job, resume, best_match)
+    inserted = await application_repo.save(draft)
+    if not inserted:
+        bound.warning("application_repo.save returned False after write")
+    else:
+        bound.info("letter draft saved ({n} chars, lang={lang})", n=len(draft.cover_letter), lang=draft.language)
+
+
+async def _scan(
+    *,
+    max_pages: int,
+    max_details: int,
+    dump: bool,
+    no_match: bool,
+    no_letter: bool,
+) -> None:
     bound = logger.bind(worker="feed")
     job_repo = build_job_repository(settings)
     dump_dir = ARTIFACTS_DIR if dump else None
 
     matcher: Matcher | None = None
     match_repo: MatchRepositoryProtocol | None = None
+    letter_writer: LetterWriter | None = None
+    application_repo: ApplicationRepositoryProtocol | None = None
     resumes: list[Resume] = []
     if not no_match:
         client = build_anthropic_client(settings)
@@ -141,6 +200,10 @@ async def _scan(*, max_pages: int, max_details: int, dump: bool, no_match: bool)
         match_repo = build_match_repository(settings)
         resumes = build_resumes(settings)
         bound.info("matcher ready: model={m} resumes={r}", m=matcher.model, r=[r.id for r in resumes])
+        if not no_letter:
+            letter_writer = build_letter_writer(settings, client)
+            application_repo = build_application_repository(settings)
+            bound.info("letter writer ready: model={m}", m=letter_writer.model)
 
     async with open_persistent_context(settings) as context:
         page = context.pages[0] if context.pages else await context.new_page()
@@ -169,6 +232,8 @@ async def _scan(*, max_pages: int, max_details: int, dump: bool, no_match: bool)
                     matcher=matcher,
                     resumes=resumes,
                     threshold=settings.match_threshold,
+                    application_repo=application_repo,
+                    letter_writer=letter_writer,
                     before_hh_action=pacer,
                 )
             except Exception:
@@ -254,6 +319,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="discover and detail-fetch only; leave matching for a later run (no LLM calls)",
     )
+    scan.add_argument(
+        "--no-letter",
+        action="store_true",
+        help="skip cover-letter generation even when a job is matched (default: draft a letter)",
+    )
     sub.add_parser(
         "sync-resumes",
         help="pull every applicant-zone resume from HH and write it to the cache dir",
@@ -279,6 +349,22 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="include jobs without any match_results (default: skip them)",
     )
+    letters = sub.add_parser(
+        "export-letters",
+        help="dump cover-letter drafts joined with jobs + match rationale into markdown",
+    )
+    letters.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="output path (default: ./artifacts/letter-review-<ts>.md)",
+    )
+    letters.add_argument(
+        "--status",
+        action="append",
+        choices=("draft", "pending", "sent", "failed"),
+        help="filter by application status; repeat to include several. Default: all.",
+    )
     return parser
 
 
@@ -292,6 +378,7 @@ def main() -> None:
                 max_details=args.max_details,
                 dump=not args.no_dump,
                 no_match=args.no_match,
+                no_letter=args.no_letter,
             )
         )
         return
@@ -308,6 +395,17 @@ def main() -> None:
                 output_path=output,
                 statuses=statuses,
                 only_with_matches=not args.all_jobs,
+            )
+        )
+        return
+    if args.command == "export-letters":
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        output = args.output or ARTIFACTS_DIR / f"letter-review-{stamp}.md"
+        asyncio.run(
+            export_letters_to_markdown(
+                settings,
+                output_path=output,
+                statuses=args.status,
             )
         )
         return

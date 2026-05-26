@@ -7,7 +7,11 @@ class Settings(BaseSettings):
     # (3+). Browser-only commands (Phase 1) start without it.
     anthropic_api_key: str | None = None
     anthropic_match_model: str = "claude-sonnet-4-6"
-    anthropic_letter_model: str = "claude-haiku-4-5-20251001"
+    # Letter writer used to default to Haiku, but live runs (see D-025/D-026)
+    # showed Haiku ignored ~30% of "do not say X" rules — Sonnet follows
+    # long-form prompt constraints more reliably. Cover-letter volume per
+    # day is small enough that the cost delta is negligible.
+    anthropic_letter_model: str = "claude-sonnet-4-6"
     anthropic_chat_model: str = "claude-sonnet-4-6"
 
     # Postgres URL is only required once we start writing jobs / matches /
