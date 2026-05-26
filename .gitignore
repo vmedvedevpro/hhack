@@ -225,9 +225,10 @@ profile/
 # Browser screenshots, fingerprint snapshots, HTML dumps. Operator-specific.
 artifacts/
 
-# Resume files are operator-specific. Only example_*.md ship in the repo.
+# Resume cache is operator-specific (filled by `hhack-feed sync-resumes`).
+# Only the directory README ships in the repo.
 resumes/*
-!resumes/example_*.md
+!resumes/README.md
 
 # Local IDE workspace files.
 *.code-workspace

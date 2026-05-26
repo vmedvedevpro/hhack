@@ -553,3 +553,206 @@ once.
 a `try/except` around each detail fetch so one broken page no longer
 aborts the scan and the remaining cards still go from `discovered` to
 `detailed`.
+
+---
+
+## D-023 · 2026-05-26 · Match logic — plain markdown resumes, single score with breakdown, matcher inline in scan
+
+**Decision:** Three coupled choices for Phase 3:
+
+1. **Resume format** — plain markdown, one file per slot
+   (`RESUME_A_PATH`, `RESUME_B_PATH`). No YAML frontmatter, no
+   structured schema. The matcher passes the raw text into the prompt
+   verbatim; the model is responsible for extracting whatever
+   structure it needs.
+2. **Score schema** — one `score` in `[0, 1]`, one short `rationale`
+   (2-3 sentences), a per-dimension `breakdown`
+   (`skills` / `seniority` / `location_comp`) and a free-form
+   `red_flags: string[]`. `MATCH_THRESHOLD` (default 0.65) compares
+   against `score` only. The breakdown and red_flags are stored in
+   `match_results.payload` (JSONB) for manual review and prompt
+   tuning — they are not load-bearing for status decisions.
+3. **Run mode** — matcher runs **inline** inside `hhack-feed scan`,
+   per-vacancy. Order per card: `open → details → match →
+   matched/skipped`, then jitter sleep, then the next card. No
+   batching.
+
+**Reasoning:**
+
+- *Format.* Markdown is what the operator already writes; structured
+  YAML adds parsing complexity for no observable matcher win — the
+  model reads narrative well. We keep the option to layer a YAML
+  frontmatter on top later if a hard pre-filter becomes necessary,
+  without breaking the current loader.
+- *Single score.* Tuning multiple thresholds in parallel is harder
+  than tuning one, and we have no evidence yet that any single
+  dimension dominates skipping decisions. Per-dimension scores are
+  still emitted (and persisted) so we can audit a failure case
+  without re-calling the LLM, but they don't gate status. AND-rules
+  are postponed to "if precision turns out to be poor."
+- *Inline in scan.* HH's defenses key on cadence and behavioral
+  fingerprint, not on LLM use. A separate batched matcher would
+  produce a recognizable "scrape, then later open detail pages to
+  evaluate" pattern. One human-paced thread —
+  open vacancy → read it (LLM) → decide → close → small pause →
+  next — looks like a person browsing the feed, which is exactly
+  what HH expects of a logged-in user. The matcher also stays
+  best-effort: a failed LLM call leaves the job in `detailed`, the
+  next scan picks it back up via `list_processable`. Phase 4/5 will
+  hang cover-letter + apply off the same inline loop.
+
+**Plumbing consequences:**
+
+- New table `match_results` with `UNIQUE (job_id, resume_id,
+  prompt_hash)`. `prompt_hash = sha256(PROMPT_VERSION || model ||
+  resume_id || resume.content)` — excludes the vacancy on purpose,
+  so the idempotency anchor is "this prompt/resume already evaluated
+  this job," not "this exact vacancy text was already evaluated."
+  Bumping `PROMPT_VERSION` in `matching/prompts.py` after a rules
+  edit invalidates the cache naturally — old rows survive for
+  comparison, new rows appear on the next scan.
+- `Job.status` lifecycle gains `matched` and `skipped`. `mark_matched`
+  / `mark_skipped` are called only after every resume slot has
+  either a fresh decision or a pre-existing one; partial runs stay
+  in `detailed`.
+- Prompt caching is on by default — system block 0 is
+  `MATCH_RULES`, block 1 is the resume content, both with
+  `cache_control={"type":"ephemeral"}`. The vacancy block goes in
+  the user message uncached.
+
+**Alternative considered:**
+
+- *Structured YAML resumes.* Rejected as premature: we have no
+  pre-filter to drive off the structured fields, and the matcher
+  already handles markdown well. Easy to add later as optional
+  frontmatter without changing the loader contract.
+- *Per-dimension AND-rule on threshold.* Rejected for Phase 3
+  because we cannot calibrate multiple thresholds without first
+  having a working single-score baseline.
+- *Separate `hhack-feed match` command.* Rejected because it splits
+  the human-cadence pattern into a "scrape now, evaluate later"
+  shape that's more distinguishable from real user behavior.
+  `--no-match` on `scan` covers the "I want to crawl without
+  burning API tokens" case without breaking the production flow.
+
+---
+
+## D-024 · 2026-05-26 · Resumes come from HH applicant zone, not hand-managed markdown
+
+**Decision:** The matcher's resumes are populated by syncing from HH's
+applicant zone instead of being maintained by the operator as local
+markdown files. Mechanics:
+
+- `hhack-feed sync-resumes` opens `https://hh.ru/applicant/resumes` in
+  the persistent profile, collects every `a[href*="/resume/<id>"]`,
+  navigates to each `/resume/<id>` and parses HH's
+  `<template id="HH-Lux-InitialState">` JSON state — specifically
+  `applicantResume.*` — into matcher-ready markdown. Output is written
+  to `resumes/cache/<hh_resume_id>.md` (configurable via
+  `RESUMES_CACHE_DIR`).
+- `load_resumes` reads every `*.md` from that cache directory. The
+  slot id stored in `match_results.resume_id` is the HH `resume_id`
+  (the filename), which is byte-identical to what `feed.py` writes to
+  `jobs.feed_resume_hint`.
+- `match_results.resume_id` widens from `String(8)` to `String(64)`
+  (migration `2_widen_resume_id.py`) to fit the 38-char hex.
+- Only matcher-relevant fields survive into the markdown: title,
+  desired salary, area, availability/relocation/business-trip flags,
+  professional role, full experience (with company, position, dates,
+  description), skills, education (level + universities + courses),
+  languages with CEFR level. PII (firstName, lastName, contacts,
+  photo, personal site, metro, residence district) is stripped.
+
+**Reasoning:**
+
+- *Single source of truth.* HH already builds the operator's
+  personalized feed from these same resumes; matching against any
+  other text would let the matcher drift from what HH itself is
+  recommending. Auto-sync removes "did you update both your HH and
+  your local markdown?" as a class of bug.
+- *Natural routing key.* The HH `resume_id` already appears on every
+  vacancy card in `feed_resume_hint`. Using it as the slot id in
+  `match_results` makes "which resume HH used to surface this job"
+  trivially joinable with "what score did the matcher give that
+  resume" — useful for Phase 4 cover-letter selection.
+- *No PII in cache by default.* Stripping name/contacts at sync time
+  means the operator can copy a cache file into a bug report or
+  diff against a coworker's resume without leaking personal data.
+- *Stable extraction surface.* HH ships the entire applicant-zone
+  resume payload inside `<template id="HH-Lux-InitialState">` as a
+  single JSON blob (this is HH's own SSR contract). DOM `data-qa`
+  attributes are scarce in the applicant-zone resume template — the
+  HTML carries fewer than ten of them. The template route is both
+  simpler and more durable than DOM scraping.
+
+**Alternative considered:**
+
+- *Hand-maintained markdown (the original Phase 3 design).* Rejected
+  for the drift reason above, and because the operator already had
+  to keep HH resumes up-to-date anyway — having a second copy adds
+  work without adding value.
+- *Top-level YAML frontmatter on top of synced markdown.* Postponed
+  until a hard pre-filter (e.g. "skip vacancies that require
+  on-site Moscow when relocation=no") actually proves necessary.
+  The sync layer would add it cheaply if needed.
+- *HH public API (`/resumes/mine`).* Rejected because it requires
+  OAuth tokens that don't live in the operator's normal browser
+  cookies, and would create a second auth path to maintain. The
+  same persistent browser context already has the session.
+
+**Consequence on Phase 3 spec:** `RESUME_A_PATH`/`RESUME_B_PATH` are
+removed from `config.py` and `.env.example`. Replaced by
+`RESUMES_CACHE_DIR` (defaulting to `./resumes/cache`). `resumes/`
+gitignore exception narrows from `!resumes/example_*.md` to
+`!resumes/README.md`; the example files are deleted.
+
+---
+
+## D-025 · 2026-05-26 · Matcher output via Anthropic tool use, not free-form JSON
+
+**Decision:** The matcher asks the model to return its decision by
+invoking a forced tool call (`score_match`) with a typed input schema,
+instead of asking for a JSON string in plain text. ``AnthropicClient``
+gains a `create_tool_call` method that returns the SDK-parsed
+``input`` dict directly. ``PROMPT_VERSION`` bumps `match-v1` →
+`match-v2` so any previously persisted decisions stay in
+`match_results` for comparison while every new pair gets re-evaluated
+against the new prompt.
+
+**Reasoning:** First live `hhack-feed scan` against Sonnet 4.6 produced
+exactly the failure mode the free-form path is famous for —
+``json.decoder.JSONDecodeError: Expecting ',' delimiter`` on a
+``rationale`` that contained an unescaped character. The job ended up
+in `failed` state and Phase 3 lost a usable score for it. Tool use
+shifts JSON validity from "model has to remember to escape" to "SDK
+guarantees a parsed dict or raises before we ever see the body."
+The schema also serves as a second mile of documentation for the
+model — fields, types, ranges, and required-ness all live in one
+place that's read by both the API and our validator.
+
+**Alternatives considered:**
+
+- *JSON repair library (e.g. `json-repair`).* Rejected — would fix
+  the symptom (parse error) but not the cause (model produces
+  malformed text), and would add a third-party dependency for one
+  call site.
+- *Switch to XML output.* Rejected as strictly worse than tool use:
+  same brittleness around special characters, plus the SDK doesn't
+  validate it.
+- *Tighten the prompt with "return JSON only" reminders.* Rejected
+  as superstition — Anthropic explicitly recommends tool use for
+  structured output, and there's no rules edit that turns "almost
+  always valid JSON" into "always valid JSON" the way the schema
+  contract does.
+
+**Plumbing consequences:**
+
+- `MATCH_TOOL_SCHEMA` lives next to `MATCH_RULES` in
+  `matching/prompts.py`. Rules text no longer describes the JSON
+  shape — only the rubric and the instruction "verify result via tool
+  score_match".
+- `parse_match_response` is replaced by `validate_match_payload`
+  (which only re-checks `score`/`rationale` and clamps to `[0, 1]`).
+- `FakeAnthropicClient` gets `create_tool_call` + `fake_tool_call`
+  helper. Both `create_message` and `create_tool_call` share the same
+  canned-response stream so existing tests don't need to choose paths.

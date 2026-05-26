@@ -22,9 +22,10 @@ class Settings(BaseSettings):
     browser_viewport_width: int = 1440
     browser_viewport_height: int = 900
 
-    # Resume paths are only required once the matcher runs (Phase 3+).
-    resume_a_path: str | None = None
-    resume_b_path: str | None = None
+    # Resumes are synced from HH applicant zone into this directory; the
+    # matcher loads every .md file found there. Override only if you want
+    # to keep them somewhere outside the repo (e.g. ~/.local/share/hhack/resumes).
+    resumes_cache_dir: str | None = None
 
     match_threshold: float = 0.65
     max_applications_per_day: int = 20

@@ -19,7 +19,7 @@ def test_extract_hh_id_returns_none_on_unrelated_url():
 
 
 def test_extract_resume_id_returns_id_from_search_url():
-    url = "https://hh.ru/search/vacancy?" "resume=abc123def&hhtmFromLabel=rec_vacancy_show_all&hhtmFrom=main"
+    url = "https://hh.ru/search/vacancy?resume=abc123def&hhtmFromLabel=rec_vacancy_show_all&hhtmFrom=main"
     assert extract_resume_id(url) == "abc123def"
 
 

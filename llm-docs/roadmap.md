@@ -111,15 +111,43 @@ live HH still owed.
 - [ ] Low-cadence run for ≥1 week. Goal: selectors stay stable,
       HH does not flag the traffic, posted_at extraction holds.
 
-## Phase 3 — match logic (no applications yet)
+## Phase 3 — match logic (no applications yet)  [~] in progress
 
-- [ ] Define resume schema and load operator resumes from configured
-      paths.
-- [ ] Match prompt with resume content cached. One call per
-      (job, resume) pair, returns score + short rationale.
-- [ ] Persist to `match_results`. Threshold lives in config.
-- [ ] Operator reviews 200–500 decisions by hand. Tune prompt and
-      threshold until precision feels right. No automated apply yet.
+Code landed 2026-05-26. Live validation against the operator's real
+resumes still owed.
+
+- [x] Plain-markdown resume slots. Loaded from per-resume `.md` files
+      (see D-023, D-024 for the source change).
+- [x] Match prompt with resume content cached. One call per
+      (job, resume) pair; returns `score (0..1)` + `rationale` +
+      per-dimension `breakdown` + `red_flags`.
+- [x] `match_results` persisted via `MatchRepository`; idempotent on
+      `(job_id, resume_id, prompt_hash)`. `MATCH_THRESHOLD` drives
+      `matched` vs `skipped` status on the job row.
+- [x] Matcher runs inline inside `hhack-feed scan` (one human-paced
+      thread: open → details → match → next), with `--no-match` to
+      disable for cheap dry-runs.
+- [ ] Live run: operator reviews 200–500 decisions by hand. Tune
+      `MATCH_RULES` and `MATCH_THRESHOLD` until precision feels right.
+      Bump `PROMPT_VERSION` on each rules change so old rows survive
+      and re-matches naturally appear.
+
+## Phase 3.1 — resumes synced from HH applicant zone
+
+Code landed 2026-05-26. See D-024 for the rationale.
+
+- [x] `extract_resume_markdown` — pure parser over HH applicant-zone
+      page HTML. Reads `<template id="HH-Lux-InitialState">.applicantResume`,
+      formats matcher-relevant fields to markdown, strips PII.
+- [x] `hhack-feed sync-resumes` — opens `/applicant/resumes`,
+      iterates every resume, writes `resumes/cache/<hh_resume_id>.md`.
+      Idempotent.
+- [x] `load_resumes` reads `resumes/cache/*.md`; slot id = HH
+      `resume_id`. `RESUME_A_PATH`/`B_PATH` removed,
+      `RESUMES_CACHE_DIR` added. `match_results.resume_id` widened
+      to `String(64)` (migration `2_widen_resume_id.py`).
+- [ ] Live `sync-resumes` run on the operator's account, followed by
+      Phase 3 live validation against the synced markdown.
 
 ## Phase 4 — cover letter generation
 

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from itertools import count
 
 from hhack.domain.job import Job
+from hhack.matching.matcher import MatchResult
 from hhack.persistence.job_repository import FeedCard, JobDetails
 
 
@@ -19,6 +21,7 @@ class FakeJobRepository:
 
     def __init__(self) -> None:
         self.rows: dict[int, Job] = {}
+        self._next_pk = count(1)
 
     async def filter_known(self, hh_ids: Sequence[int]) -> set[int]:
         return {hh_id for hh_id in hh_ids if hh_id in self.rows}
@@ -29,6 +32,7 @@ class FakeJobRepository:
             if card.hh_id in self.rows:
                 continue
             self.rows[card.hh_id] = Job(
+                id=next(self._next_pk),
                 hh_id=card.hh_id,
                 url=card.url,
                 title=card.title,
@@ -47,6 +51,11 @@ class FakeJobRepository:
         pending.sort(key=lambda j: j.first_seen_at)
         return pending[:limit]
 
+    async def list_processable(self, limit: int) -> list[Job]:
+        rows = [job for job in self.rows.values() if job.status in {"discovered", "detailed"}]
+        rows.sort(key=lambda j: j.first_seen_at)
+        return rows[:limit]
+
     async def save_details(self, details: JobDetails) -> bool:
         job = self.rows.get(details.hh_id)
         if job is None:
@@ -59,3 +68,40 @@ class FakeJobRepository:
         job.status = "detailed"
         job.detail_fetched_at = datetime.now(UTC)
         return True
+
+    async def mark_matched(self, job_id: int) -> bool:
+        return self._set_status(job_id, "matched")
+
+    async def mark_skipped(self, job_id: int) -> bool:
+        return self._set_status(job_id, "skipped")
+
+    def _set_status(self, job_id: int, status: str) -> bool:
+        for job in self.rows.values():
+            if job.id == job_id:
+                job.status = status
+                return True
+        return False
+
+
+class FakeMatchRepository:
+    """In-memory ``MatchRepositoryProtocol`` for tests."""
+
+    def __init__(self) -> None:
+        self.rows: list[MatchResult] = []
+
+    async def exists(self, *, job_id: int, resume_id: str, prompt_hash: str) -> bool:
+        return any(r.job_id == job_id and r.resume_id == resume_id and r.prompt_hash == prompt_hash for r in self.rows)
+
+    async def save(self, result: MatchResult) -> bool:
+        if await self.exists(
+            job_id=result.job_id,
+            resume_id=result.resume_id,
+            prompt_hash=result.prompt_hash,
+        ):
+            return False
+        self.rows.append(result)
+        return True
+
+    async def best_score(self, job_id: int) -> float | None:
+        scores = [r.score for r in self.rows if r.job_id == job_id]
+        return max(scores) if scores else None

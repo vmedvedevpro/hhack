@@ -54,8 +54,22 @@ class JobRepositoryProtocol(Protocol):
     async def list_pending_details(self, limit: int) -> list[Job]:
         """Return up to `limit` jobs with status == 'discovered'."""
 
+    async def list_processable(self, limit: int) -> list[Job]:
+        """Jobs the feed worker still owes work on: ``discovered`` or ``detailed``.
+
+        Ordered by ``first_seen_at`` so older vacancies drain first. Detailed
+        rows show up here when an earlier scan saved details but crashed
+        before persisting match results.
+        """
+
     async def save_details(self, details: JobDetails) -> bool:
         """Update detail-page fields and flip status to 'detailed'. Returns True if a row was updated."""
+
+    async def mark_matched(self, job_id: int) -> bool:
+        """Flip status detailed → matched. Returns True if a row was updated."""
+
+    async def mark_skipped(self, job_id: int) -> bool:
+        """Flip status detailed → skipped (every match scored below threshold)."""
 
 
 class SQLAlchemyJobRepository:
@@ -97,6 +111,16 @@ class SQLAlchemyJobRepository:
             )
             return list(result.scalars().all())
 
+    async def list_processable(self, limit: int) -> list[Job]:
+        async with self._factory() as session:
+            result = await session.execute(
+                select(Job)
+                .where(Job.status.in_(("discovered", "detailed")))
+                .order_by(Job.first_seen_at.asc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
     async def save_details(self, details: JobDetails) -> bool:
         stmt = (
             update(Job)
@@ -112,6 +136,18 @@ class SQLAlchemyJobRepository:
             )
             .returning(Job.hh_id)
         )
+        async with self._factory.begin() as session:
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none() is not None
+
+    async def mark_matched(self, job_id: int) -> bool:
+        return await self._set_status(job_id, "matched")
+
+    async def mark_skipped(self, job_id: int) -> bool:
+        return await self._set_status(job_id, "skipped")
+
+    async def _set_status(self, job_id: int, status: str) -> bool:
+        stmt = update(Job).where(Job.id == job_id).values(status=status).returning(Job.id)
         async with self._factory.begin() as session:
             result = await session.execute(stmt)
             return result.scalar_one_or_none() is not None

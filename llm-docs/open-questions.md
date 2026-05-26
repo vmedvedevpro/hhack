@@ -22,17 +22,19 @@ and delete the question from here.
   At apply time HH lets the operator pick a resume regardless of
   source, so the hint is informational only.
 
-## Blocking before Phase 3
+## Resolved during Phase 3
 
-- **Resume format.** Markdown? Structured YAML / JSON (sections,
-  skills, experience entries)? Markdown is easier for the operator to
-  maintain; structured is easier for the matcher to reason over. A
-  middle ground: markdown with a YAML frontmatter for facts the
-  matcher cares about (years_experience, primary_skills, locations,
-  remote_ok).
-- **Match threshold semantics.** Single 0–100 score, or
-  per-dimension (skills, seniority, comp, location) with rule-based
-  AND? Start with single score, revisit if precision is poor.
+- ~~**Resume format.**~~ Resolved 2026-05-26 as plain markdown — see
+  [D-023](decisions.md#d-023--2026-05-26--match-logic-plain-markdown-resumes-single-score-with-breakdown-matcher-inline-in-scan).
+  No YAML frontmatter, no structured schema. If the matcher later
+  needs hard pre-filters (years_experience, remote_ok), they get
+  added as optional frontmatter on top of the same files.
+- ~~**Match threshold semantics.**~~ Resolved 2026-05-26 as a single
+  `score` in `0..1` plus a non-thresholded `breakdown` for debug.
+  Threshold is `MATCH_THRESHOLD` (default 0.65). Per-dimension
+  AND-rules are postponed — revisit only if single-score precision
+  turns out to be poor after the manual-review pass. See
+  [D-023](decisions.md#d-023--2026-05-26--match-logic-plain-markdown-resumes-single-score-with-breakdown-matcher-inline-in-scan).
 
 ## Blocking before Phase 5
 
